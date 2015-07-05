@@ -236,7 +236,9 @@ impl fmt::Debug for Prefix {
                          .collect();
                 write!(f, "{}", chars.connect(", "))
             }
-            Prefix::Single(ref searcher) => write!(f, "{:?}", searcher),
+            Prefix::Single(ref searcher) => {
+                write!(f, "Single({:?})", searcher.pat)
+            }
             Prefix::Automaton(ref aut) => write!(f, "{:?}", aut),
         }
     }

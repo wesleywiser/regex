@@ -282,10 +282,10 @@ impl Program {
     pub fn find_prefixes(&mut self) {
         // First, look for a standard literal prefix---this includes things
         // like `a+` and `[0-9]+`, but not `a|b`.
-        let (ps, complete) = self.literals(self.skip(1));
-        if ps.len() > 0 {
-            self.prefixes = Prefix::new(ps);
-            self.prefixes_complete = complete;
+        let lits = self.literals(self.skip(1));
+        if lits.strs.len() > 0 {
+            self.prefixes = Prefix::new(lits.strs);
+            self.prefixes_complete = lits.complete;
             return;
         }
         // Ok, now look for alternate prefixes, e.g., `a|b`.
@@ -304,15 +304,15 @@ impl Program {
             match &self.insts[pc] {
                 &Inst::Split(x, y) => { stack.push(y); stack.push(x); }
                 _ => {
-                    let (alt_prefixes, complete) = self.literals(pc);
-                    if alt_prefixes.is_empty() {
+                    let lits = self.literals(pc);
+                    if lits.strs.is_empty() {
                         // If no prefixes could be identified for this
                         // alternate, then we can't use a prefix machine to
                         // skip through the input. Thus, we fail and report
                         // nothing.
                         return None;
                     }
-                    if prefixes.len() + alt_prefixes.len() > NUM_PREFIX_LIMIT {
+                    if prefixes.len() + lits.strs.len() > NUM_PREFIX_LIMIT {
                         // Arg. We've over-extended ourselves, quit with
                         // nothing to show for it.
                         //
@@ -325,8 +325,8 @@ impl Program {
                         // Thus, fail and report nothing.
                         return None;
                     }
-                    pcomplete = pcomplete && complete;
-                    prefixes.extend(alt_prefixes);
+                    pcomplete = pcomplete && lits.complete;
+                    prefixes.extend(lits.strs);
                 }
             }
         }
@@ -342,11 +342,14 @@ impl Program {
     /// Returns `true` in the tuple if the end of the literal leads trivially
     /// to a match. (This may report false negatives, but being conservative
     /// is OK.)
-    fn literals(&self, mut pc: usize) -> (Vec<String>, bool) {
+    fn literals(&self, mut pc: usize) -> Literals {
         use self::Inst::*;
 
-        let mut complete = true;
-        let mut alts = vec![String::new()];
+        let mut lits = Literals {
+            strs: vec![String::new()],
+            complete: true,
+            end: pc,
+        };
         while pc < self.insts.len() {
             let inst = &self.insts[pc];
 
@@ -354,50 +357,57 @@ impl Program {
             // it stops. Thus, the prefix alternates grow in lock step, and it
             // suffices to check one of them to see if the prefix limit has
             // been exceeded.
-            if alts[0].len() > PREFIX_LENGTH_LIMIT {
-                complete = false;
+            if lits.strs[0].len() > PREFIX_LENGTH_LIMIT {
+                lits.complete = false;
                 break;
             }
             match *inst {
                 Save(_) => { pc += 1; continue }
                 Jump(pc2) => pc = pc2,
                 Char(c) => {
-                    for alt in &mut alts {
+                    pc += 1;
+                    for alt in &mut lits.strs {
                         alt.push(c);
                     }
-                    pc += 1;
                 }
                 Ranges(CharRanges { ref ranges }) => {
+                    pc += 1;
+
                     // This adds a new literal for *each* character in this
                     // range. This has the potential to use way too much
                     // memory, so we bound it naively for now.
                     let nchars = num_chars_in_ranges(ranges);
-                    if alts.len() * nchars > NUM_PREFIX_LIMIT {
-                        complete = false;
+                    if lits.strs.len() * nchars > NUM_PREFIX_LIMIT {
+                        lits.complete = false;
                         break;
                     }
-
-                    let orig = alts;
-                    alts = Vec::with_capacity(orig.len());
+                    let orig = lits.strs;
+                    lits.strs = Vec::with_capacity(orig.len());
                     for &(s, e) in ranges {
                         for c in (s as u32)..(e as u32 + 1){
                             for alt in &orig {
                                 let mut alt = alt.clone();
                                 alt.push(::std::char::from_u32(c).unwrap());
-                                alts.push(alt);
+                                lits.strs.push(alt);
                             }
                         }
                     }
-                    pc += 1;
                 }
-                _ => { complete = self.leads_to_match(pc); break }
+                _ => { lits.complete = self.leads_to_match(pc); break }
             }
         }
-        if alts[0].len() == 0 {
-            (vec![], false)
-        } else {
-            (alts, complete)
+        if lits.strs[0].len() == 0 {
+            lits.complete = false;
+            lits.strs = vec![];
         }
+        lits.end = pc;
+        lits
+    }
+
+    /// Return literals.
+    #[allow(dead_code)]
+    pub fn lits(&self) -> Vec<String> {
+        vec![]
     }
 
     fn leads_to_match(&self, pc: usize) -> bool {
@@ -438,6 +448,12 @@ impl Clone for Program {
             backtrack: Pool::new(Box::new(create_backtrack)),
         }
     }
+}
+
+struct Literals {
+    strs: Vec<String>,
+    complete: bool,
+    end: InstIdx,
 }
 
 /// Return the number of captures in the given sequence of instructions.
@@ -546,5 +562,11 @@ mod tests {
                    vec!["a", "b", "c", "d"]);
         assert_eq!(prefixes_complete!("((a|b)|(c|d))"),
                    vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn scratch() {
+        let p = prog!("ab");
+        println!("{:?}", p.lits());
     }
 }
