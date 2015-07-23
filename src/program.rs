@@ -85,9 +85,9 @@ impl CharRanges {
     }
 
     /// Emits a range from the AST character class.
-    pub fn from_class(cls: syntax::CharClass) -> CharRanges {
+    pub fn from_class(cls: &syntax::CharClass) -> CharRanges {
         CharRanges {
-            ranges: cls.into_iter().map(|r| (r.start, r.end)).collect(),
+            ranges: cls.iter().map(|&r| (r.start, r.end)).collect(),
         }
     }
 
@@ -165,6 +165,8 @@ pub struct Program {
     pub original: String,
     /// A sequence of instructions.
     pub insts: Vec<Inst>,
+    /// A sequence of instructions representing the reverse of the regex.
+    pub rinsts: Vec<Inst>,
     /// The sequence of capture group names. There is an entry for each capture
     /// group index and a name exists only if the capture group is named.
     pub cap_names: Vec<Option<String>>,
@@ -194,14 +196,16 @@ impl Program {
         re: &str,
     ) -> Result<Program, Error> {
         let expr = try!(syntax::Expr::parse(re));
-        let (insts, cap_names) = try!(Compiler::new(size_limit).compile(expr));
+        let (insts, capnames) = try!(Compiler::new(size_limit).compile(&expr));
+        let rinsts = try!(Compiler::new(size_limit).compile_reverse(&expr));
         let (insts_len, ncaps) = (insts.len(), num_captures(&insts));
         let create_threads = move || NfaThreads::new(insts_len, ncaps);
         let create_backtrack = move || BackMachine::new();
         let mut prog = Program {
             original: re.into(),
             insts: insts,
-            cap_names: cap_names,
+            rinsts: rinsts,
+            cap_names: capnames,
             prefixes: Prefix::Empty,
             prefixes_complete: false,
             anchored_begin: false,
@@ -438,6 +442,7 @@ impl Clone for Program {
         Program {
             original: self.original.clone(),
             insts: self.insts.clone(),
+            rinsts: self.rinsts.clone(),
             cap_names: self.cap_names.clone(),
             prefixes: self.prefixes.clone(),
             prefixes_complete: self.prefixes_complete,

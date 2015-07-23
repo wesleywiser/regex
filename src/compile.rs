@@ -23,6 +23,7 @@ pub struct Compiler {
     size_limit: usize,
     insts: Vec<Inst>,
     cap_names: Vec<Option<String>>,
+    reverse: bool,
 }
 
 impl Compiler {
@@ -33,12 +34,13 @@ impl Compiler {
             size_limit: size_limit,
             insts: vec![],
             cap_names: vec![None],
+            reverse: false,
         }
     }
 
     /// Compiles the given regex AST into a tuple of a sequence of
     /// instructions and a sequence of capture groups, optionally named.
-    pub fn compile(mut self, ast: Expr) -> Result<Compiled, Error> {
+    pub fn compile(mut self, ast: &Expr) -> Result<Compiled, Error> {
         self.insts.push(Inst::Save(0));
         try!(self.c(ast));
         self.insts.push(Inst::Save(1));
@@ -46,16 +48,32 @@ impl Compiler {
         Ok((self.insts, self.cap_names))
     }
 
-    fn c(&mut self, ast: Expr) -> Result<(), Error> {
+    /// Compiles the given regex AST into a tuple of a sequence of
+    /// instructions and a sequence of capture groups, optionally named.
+    pub fn compile_reverse(mut self, ast: &Expr) -> Result<Vec<Inst>, Error> {
+        self.reverse = true;
+        self.insts.push(Inst::Save(0));
+        try!(self.c(ast));
+        self.insts.push(Inst::Save(1));
+        self.insts.push(Inst::Match);
+        Ok(self.insts)
+    }
+
+    fn c(&mut self, ast: &Expr) -> Result<(), Error> {
         use program::Inst::*;
         use program::LookInst::*;
 
-        match ast {
+        match *ast {
             Expr::Empty => {},
-            Expr::Literal { chars, casei } => {
-                for c in chars {
+            Expr::Literal { ref chars, casei } => {
+                let it: Box<Iterator<Item=char>> = if self.reverse {
+                    Box::new(chars.iter().cloned().rev())
+                } else {
+                    Box::new(chars.iter().cloned())
+                };
+                for c in it {
                     if casei {
-                        try!(self.c(Expr::Class(CharClass::new(vec![
+                        try!(self.c(&Expr::Class(CharClass::new(vec![
                             ClassRange { start: c, end: c },
                         ]).case_fold())));
                     } else {
@@ -65,7 +83,7 @@ impl Compiler {
             }
             Expr::AnyChar => self.push(Ranges(CharRanges::any())),
             Expr::AnyCharNoNL => self.push(Ranges(CharRanges::any_nonl())),
-            Expr::Class(cls) => {
+            Expr::Class(ref cls) => {
                 if cls.len() == 1 && cls[0].start == cls[0].end {
                     self.push(Char(cls[0].start));
                 } else {
@@ -78,104 +96,111 @@ impl Compiler {
             Expr::EndText => self.push(EmptyLook(EndText)),
             Expr::WordBoundary => self.push(EmptyLook(WordBoundary)),
             Expr::NotWordBoundary => self.push(EmptyLook(NotWordBoundary)),
-            Expr::Group { e, i: None, name: None } => try!(self.c(*e)),
-            Expr::Group { e, i, name } => {
+            Expr::Group { ref e, i: None, name: None } => try!(self.c(e)),
+            Expr::Group { ref e, i, ref name } => {
                 let i = i.expect("capture index");
-                self.cap_names.push(name);
-                self.push(Save(2 * i));
-                try!(self.c(*e));
-                self.push(Save(2 * i + 1));
-            }
-            Expr::Concat(es) => {
-                for e in es {
+                if self.reverse {
+                    self.cap_names.push(name.clone());
+                    self.push(Save(2 * i));
                     try!(self.c(e));
+                    self.push(Save(2 * i + 1));
+                } else {
+                    self.cap_names.push(name.clone());
+                    self.push(Save(2 * i));
+                    try!(self.c(e));
+                    self.push(Save(2 * i + 1));
                 }
             }
-            Expr::Alternate(mut es) => {
-                // TODO: Don't use recursion here. ---AG
+            Expr::Concat(ref es) => {
+                if self.reverse {
+                    for e in es.iter().rev() {
+                        try!(self.c(e));
+                    }
+                } else {
+                    for e in es {
+                        try!(self.c(e));
+                    }
+                }
+            }
+            Expr::Alternate(ref es) => {
                 if es.len() == 0 {
                     return Ok(());
                 }
-                let e1 = es.remove(0);
-                if es.len() == 0 {
-                    try!(self.c(e1));
-                    return Ok(());
+                let mut jmps_to_end = vec![];
+                for e in &es[0..es.len()-1] {
+                    let split = self.empty_split();
+                    let j1 = self.insts.len();
+                    try!(self.c(e));
+                    jmps_to_end.push(self.empty_jump());
+                    let j2 = self.insts.len();
+                    self.set_split(split, j1, j2);
                 }
-                let e2 = Expr::Alternate(es); // this causes recursion
-
-                let split = self.empty_split();
-                let j1 = self.insts.len();
-                try!(self.c(e1));
-                let jmp = self.empty_jump();
-                let j2 = self.insts.len();
-                try!(self.c(e2));
-                let j3 = self.insts.len();
-
-                self.set_split(split, j1, j2);
-                self.set_jump(jmp, j3);
+                try!(self.c(&es[es.len()-1]));
+                let end = self.insts.len();
+                for jmp_to_end in jmps_to_end {
+                    self.set_jump(jmp_to_end, end);
+                }
             }
-            Expr::Repeat { e, r: Repeater::ZeroOrOne, greedy } => {
+            Expr::Repeat { ref e, r: Repeater::ZeroOrOne, greedy } => {
                 let split = self.empty_split();
                 let j1 = self.insts.len();
-                try!(self.c(*e));
+                try!(self.c(e));
                 let j2 = self.insts.len();
 
-                if greedy {
+                if greedy || self.reverse {
                     self.set_split(split, j1, j2);
                 } else {
                     self.set_split(split, j2, j1);
                 }
             }
-            Expr::Repeat { e, r: Repeater::ZeroOrMore, greedy } => {
+            Expr::Repeat { ref e, r: Repeater::ZeroOrMore, greedy } => {
                 let j1 = self.insts.len();
                 let split = self.empty_split();
                 let j2 = self.insts.len();
-                try!(self.c(*e));
+                try!(self.c(e));
                 let jmp = self.empty_jump();
                 let j3 = self.insts.len();
 
                 self.set_jump(jmp, j1);
-                if greedy {
+                if greedy || self.reverse {
                     self.set_split(split, j2, j3);
                 } else {
                     self.set_split(split, j3, j2);
                 }
             }
-            Expr::Repeat { e, r: Repeater::OneOrMore, greedy } => {
+            Expr::Repeat { ref e, r: Repeater::OneOrMore, greedy } => {
                 let j1 = self.insts.len();
-                try!(self.c(*e));
+                try!(self.c(e));
                 let split = self.empty_split();
                 let j2 = self.insts.len();
 
-                if greedy {
+                if greedy || self.reverse {
                     self.set_split(split, j1, j2);
                 } else {
                     self.set_split(split, j2, j1);
                 }
             }
             Expr::Repeat {
-                e,
+                ref e,
                 r: Repeater::Range { min, max: None },
                 greedy,
             } => {
-                let e = *e;
                 for _ in 0..min {
-                    try!(self.c(e.clone()));
+                    try!(self.c(e));
                 }
-                try!(self.c(Expr::Repeat {
-                    e: Box::new(e),
+                try!(self.c(&Expr::Repeat {
+                    e: e.clone(),
                     r: Repeater::ZeroOrMore,
                     greedy: greedy,
                 }));
             }
             Expr::Repeat {
-                e,
+                ref e,
                 r: Repeater::Range { min, max: Some(max) },
                 greedy,
             } => {
-                let e = *e;
                 for _ in 0..min {
-                    try!(self.c(e.clone()));
+                    try!(self.c(e));
                 }
                 // It is much simpler to compile, e.g., `a{2,5}` as:
                 //
@@ -205,11 +230,11 @@ impl Compiler {
                 for _ in min..max {
                     splits.push(self.empty_split());
                     starts.push(self.insts.len());
-                    try!(self.c(e.clone()));
+                    try!(self.c(e));
                 }
                 let end = self.insts.len();
                 for (split, start) in splits.into_iter().zip(starts) {
-                    if greedy {
+                    if greedy || self.reverse {
                         self.set_split(split, start, end);
                     } else {
                         self.set_split(split, end, start);
