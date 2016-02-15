@@ -138,6 +138,13 @@ impl Compiler {
         })
     }
 
+    pub fn compile_many(
+        mut self,
+        exprs: &[Expr],
+    ) -> result::Result<Compiled, Error> {
+        unreachable!()
+    }
+
     fn c(&mut self, expr: &Expr) -> Result {
         use inst;
         use syntax::Expr::*;

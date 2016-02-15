@@ -52,7 +52,7 @@ pub struct Program {
 
 /// A builder for compiling a regular expression program.
 pub struct ProgramBuilder {
-    re: String,
+    res: Vec<String>,
     compiler: Compiler,
 }
 
@@ -63,7 +63,18 @@ impl ProgramBuilder {
     /// values for other knobs are set automatically.
     pub fn new(re: &str) -> Self {
         ProgramBuilder {
-            re: re.to_owned(),
+            res: vec![re.to_owned()],
+            compiler: Compiler::new(),
+        }
+    }
+
+    /// Create a new program builder for the given regular expressions.
+    ///
+    /// Afer new_many is called, it is legal to call compile immediately.
+    /// Default values for other knobs are set automatically.
+    pub fn new_many<S: AsRef<str>>(res: &[S]) -> Self {
+        ProgramBuilder {
+            res: res.iter().map(|s| s.as_ref().to_owned()).collect(),
             compiler: Compiler::new(),
         }
     }
@@ -108,7 +119,17 @@ impl ProgramBuilder {
     /// If the regular expression could not be compiled (e.g., it is too big),
     /// then return an error.
     pub fn compile(self) -> Result<Program, Error> {
-        let expr = try!(syntax::Expr::parse(&self.re));
+        debug_assert!(self.res.len() >= 1);
+        if self.res.len() == 1 {
+            self.compile_one()
+        } else {
+            self.compile_many()
+        }
+    }
+
+    fn compile_one(mut self) -> Result<Program, Error> {
+        debug_assert!(self.res.len() == 1);
+        let expr = try!(syntax::Expr::parse(&self.res[0]));
         let Compiled { insts, cap_names } = try!(self.compiler.compile(&expr));
         let (prefixes, anchored_begin, anchored_end) = (
             insts.prefix_matcher(),
@@ -116,7 +137,36 @@ impl ProgramBuilder {
             insts.anchored_end(),
         );
         Ok(Program {
-            original: self.re,
+            original: self.res.pop().unwrap(),
+            insts: insts,
+            cap_names: cap_names,
+            prefixes: prefixes,
+            anchored_begin: anchored_begin,
+            anchored_end: anchored_end,
+            cache: EngineCache::new(),
+        })
+    }
+
+    fn compile_many(self) -> Result<Program, Error> {
+        debug_assert!(self.res.len() > 1);
+        let original =
+            self.res.iter()
+                .map(|s| format!("(?:{})", s))
+                .collect::<Vec<String>>()
+                .join("|");
+        let mut exprs = vec![];
+        for re in &self.res {
+            exprs.push(try!(syntax::Expr::parse(re)));
+        }
+        let Compiled { insts, cap_names } =
+            try!(self.compiler.compile_many(&exprs));
+        let (prefixes, anchored_begin, anchored_end) = (
+            insts.prefix_matcher(),
+            insts.anchored_begin(),
+            insts.anchored_end(),
+        );
+        Ok(Program {
+            original: original,
             insts: insts,
             cap_names: cap_names,
             prefixes: prefixes,

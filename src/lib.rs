@@ -438,7 +438,9 @@
 //! allowed to store a fixed number of states. (When the limit is reached, its
 //! states are wiped and continues on, possibly duplicating previous work.)
 
-#![deny(missing_docs)]
+#![allow(dead_code, unused_variables, unused_imports, unused_mut)]
+
+// #![deny(missing_docs)]
 #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(feature = "pattern", feature(pattern))]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -471,6 +473,8 @@ mod nfa;
 mod pool;
 mod program;
 mod re;
+mod set;
+mod set_exec;
 mod sparse;
 
 /// The `internal` module exists to support the `regex!` macro and other
