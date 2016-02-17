@@ -244,7 +244,7 @@ impl<'a> BuildRequiredLiterals<'a> {
                     }
                     pc = inst.goto;
                 }
-                Split(_) | EmptyLook(_) | Match => {
+                Split(_) | EmptyLook(_) | Match(_) => {
                     self.alts.at_match = self.insts.leads_to_match(pc);
                     break;
                 }

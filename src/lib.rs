@@ -459,6 +459,8 @@ pub use re::{
     Replacer, NoExpand, RegexSplits, RegexSplitsN,
     quote, is_match,
 };
+// Don't forget about regex sets!
+pub use set::{RegexSetBuilder, RegexSet};
 
 mod backtrack;
 mod char;

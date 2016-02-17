@@ -87,7 +87,10 @@ pub fn can_exec(insts: &Insts) -> bool {
                     StartLine | EndLine | StartText | EndText => {}
                 }
             }
-            Inst::Match | Inst::Save(_) | Inst::Split(_) | Inst::Bytes(_) => {}
+            Inst::Match(_)
+            | Inst::Save(_)
+            | Inst::Split(_)
+            | Inst::Bytes(_) => {}
         }
     }
     true
@@ -578,7 +581,7 @@ impl<'a> Dfa<'a> {
                 Char(_) | Ranges(_) => unreachable!(),
                 // These states are handled when following epsilon transitions.
                 Save(_) | Split(_) | EmptyLook(_) => {}
-                Match => {
+                Match(_) => {
                     flags.set_match(true);
                     if !self.prog.is_reversed() {
                         break;
@@ -650,7 +653,7 @@ impl<'a> Dfa<'a> {
             q.add(ip as usize);
             match self.prog.insts[ip as usize] {
                 Char(_) | Ranges(_) => unreachable!(),
-                Match | Bytes(_) => {}
+                Match(_) | Bytes(_) => {}
                 EmptyLook(ref inst) => {
                     // Only follow empty assertion states if our flags satisfy
                     // the assertion.
@@ -796,7 +799,7 @@ impl<'a> Dfa<'a> {
                         WordBoundary | NotWordBoundary => unreachable!(),
                     }
                 }
-                Match => {
+                Match(_) => {
                     insts.push(ip);
                     // If this is a reverse program, then we want to continue
                     // executing to find the longest possible match. Otherwise,

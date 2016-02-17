@@ -9,7 +9,11 @@
 // except according to those terms.
 
 use dfa;
+use input::{ByteInput, CharInput};
+use nfa::Nfa;
 use program::{Program, ProgramBuilder};
+use re::CaptureIdxs;
+
 use Error;
 
 pub struct SetExec {
@@ -57,12 +61,60 @@ impl SetExecBuilder {
                            .dfa(true)
                            .reverse(true)
                            .compile());
-        let can_dfa = dfa::can_exec(&dfa.insts);
+        // let can_dfa = dfa::can_exec(&dfa.insts);
         Ok(SetExec {
             prog: prog,
             dfa: dfa,
             dfa_reverse: dfa_reverse,
-            can_dfa: can_dfa,
+            can_dfa: false,
         })
+    }
+}
+
+impl SetExec {
+    pub fn exec(
+        &self,
+        caps: &mut CaptureIdxs,
+        text: &str,
+        start: usize,
+    ) -> bool {
+        if self.can_dfa {
+            self.exec_dfa(caps, text, start)
+        } else {
+            self.exec_nfa(caps, text, start)
+        }
+    }
+
+    fn exec_nfa(
+        &self,
+        caps: &mut CaptureIdxs,
+        text: &str,
+        start: usize,
+    ) -> bool {
+        let mut matches = vec![false; self.prog.insts.matches().len()];
+        let m = if self.prog.insts.is_bytes() {
+            Nfa::exec(
+                &self.prog, caps, &mut matches, ByteInput::new(text), start)
+        } else {
+            Nfa::exec(
+                &self.prog, caps, &mut matches, CharInput::new(text), start)
+        };
+        println!("MATCHES: {:?}", matches);
+        m
+    }
+
+    fn exec_dfa(
+        &self,
+        caps: &mut CaptureIdxs,
+        text: &str,
+        start: usize,
+    ) -> bool {
+        unreachable!()
+    }
+
+    /// Return a fresh allocation for storing all possible captures in the
+    /// underlying regular expression.
+    pub fn alloc_captures(&self) -> Vec<Option<usize>> {
+        self.prog.alloc_captures()
     }
 }

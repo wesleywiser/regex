@@ -203,7 +203,10 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
             // next, avoid the push and just mutate `ip` (and possibly `at`)
             // in place.
             match self.prog.insts[ip] {
-                Match => return true,
+                Match(slot) => {
+                    debug_assert!(slot == 0);
+                    return true;
+                }
                 Save(ref inst) => {
                     if inst.slot < self.caps.len() {
                         // If this path doesn't work out, then we save the old

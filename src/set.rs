@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use set_exec::SetExec;
+use set_exec::{SetExec, SetExecBuilder};
 
 use Error;
 
@@ -27,8 +27,17 @@ impl RegexSetBuilder {
     }
 
     pub fn compile(self) -> Result<RegexSet, Error> {
-        unreachable!()
+        SetExecBuilder::new(self.res).build().map(RegexSet)
     }
 }
 
 pub struct RegexSet(SetExec);
+
+impl RegexSet {
+    pub fn is_match(&self, text: &str) -> bool {
+        let mut caps = self.0.alloc_captures();
+        let m = self.0.exec(&mut caps, text, 0);
+        println!("CAPS: {:?}", caps);
+        m
+    }
+}

@@ -14,6 +14,9 @@ pub type InstPtr = usize;
 #[derive(Clone)]
 pub struct Insts {
     insts: Vec<Inst>,
+    capture_names: Vec<Option<String>>,
+    matches: Vec<InstPtr>,
+    start: InstPtr,
     bytes: bool,
     reverse: bool,
     byte_classes: Vec<u8>,
@@ -28,6 +31,9 @@ impl Insts {
     /// A Vec<Inst> can be created with the compiler.
     pub fn new(
         insts: Vec<Inst>,
+        capture_names: Vec<Option<String>>,
+        matches: Vec<InstPtr>,
+        start: InstPtr,
         bytes: bool,
         reverse: bool,
         byte_classes: Vec<u8>,
@@ -35,6 +41,9 @@ impl Insts {
         assert!(byte_classes.len() == 256);
         Insts {
             insts: insts,
+            capture_names: capture_names,
+            matches: matches,
+            start: start,
             bytes: bytes,
             reverse: reverse,
             byte_classes: byte_classes,
@@ -79,22 +88,30 @@ impl Insts {
     /// instruction, to support unanchored matches. Generally, we want to
     /// ignore that `.*?` when doing analysis, like extracting prefixes.)
     pub fn start(&self) -> InstPtr {
-        for (i, inst) in self.iter().enumerate() {
-            match *inst {
-                Inst::Save(ref inst) if inst.slot == 0 => return i,
-                _ => {}
-            }
-        }
-        unreachable!()
+        self.start
     }
 
     /// Return true if and only if an execution engine at instruction `pc` will
     /// always lead to a match.
     pub fn leads_to_match(&self, pc: usize) -> bool {
+        if self.matches.len() > 1 {
+            // If we have a regex set, then we have more than one ending
+            // state, so leading to one of those states is generally
+            // meaningless.
+            return false;
+        }
         match self[self.skip(pc)] {
-            Inst::Match => true,
+            Inst::Match(_) => true,
             _ => false,
         }
+    }
+
+    pub fn capture_names(&self) -> &[Option<String>] {
+        &self.capture_names
+    }
+
+    pub fn matches(&self) -> &[InstPtr] {
+        &self.matches
     }
 
     /// Return true if and only if the regex is anchored at the start of
@@ -171,7 +188,9 @@ impl fmt::Debug for Insts {
         try!(writeln!(f, "--------------------------------"));
         for (pc, inst) in self.iter().enumerate() {
             match *inst {
-                Match => try!(writeln!(f, "{:04} Match", pc)),
+                Match(slot) => {
+                    try!(writeln!(f, "{:04} Match({})", pc, slot));
+                }
                 Save(ref inst) => {
                     let s = format!("{:04} Save({})", pc, inst.slot);
                     try!(writeln!(f, "{}", with_goto(pc, inst.goto, s)));
@@ -241,7 +260,13 @@ impl<'a> IntoIterator for &'a Insts {
 #[derive(Clone, Debug)]
 pub enum Inst {
     /// Match indicates that the program has reached a match state.
-    Match,
+    ///
+    /// The number in the match corresponds to the Nth logical regular
+    /// expression in this program. This index is always 0 for normal regex
+    /// programs. Values greater than 0 appear when compiling regex sets, and
+    /// each match instruction gets its own unique value. The value corresponds
+    /// to the Nth regex in the set.
+    Match(usize),
     /// Save causes the program to save the current location of the input in
     /// the slot indicated by InstSave.
     Save(InstSave),

@@ -102,6 +102,7 @@ impl<'r, I: Input> Nfa<'r, I> {
     pub fn exec(
         prog: &'r Program,
         mut caps: &mut CaptureIdxs,
+        mut matches: &mut [bool],
         input: I,
         start: usize,
     ) -> bool {
@@ -114,7 +115,13 @@ impl<'r, I: Input> Nfa<'r, I> {
             prog: prog,
             stack: &mut cache.stack,
             input: input,
-        }.exec_(&mut cache.clist, &mut cache.nlist, &mut caps, at)
+        }.exec_(
+            &mut cache.clist,
+            &mut cache.nlist,
+            &mut caps,
+            &mut matches,
+            at,
+        )
     }
 
     fn exec_(
@@ -122,6 +129,7 @@ impl<'r, I: Input> Nfa<'r, I> {
         mut clist: &mut Threads,
         mut nlist: &mut Threads,
         mut caps: &mut CaptureIdxs,
+        mut matches: &mut [bool],
         mut at: InputAt,
     ) -> bool {
         let mut matched = false;
@@ -167,10 +175,18 @@ impl<'r, I: Input> Nfa<'r, I> {
             let at_next = self.input.at(at.next_pos());
             for i in 0..clist.set.len() {
                 let ip = clist.set[i];
-                let tcaps = clist.caps(ip);
-                if self.step(&mut nlist, caps, tcaps, ip, at, at_next) {
+                let m = self.step(
+                    &mut nlist,
+                    caps,
+                    matches,
+                    &mut clist.caps(ip),
+                    ip,
+                    at,
+                    at_next,
+                );
+                if m {
                     matched = true;
-                    if caps.len() == 0 {
+                    if caps.is_empty() && matches.is_empty() {
                         // If we only care if a match occurs (not its
                         // position), then we can quit right now.
                         break 'LOOP;
@@ -179,6 +195,22 @@ impl<'r, I: Input> Nfa<'r, I> {
                     // set because we've matched something ("leftmost-first").
                     // However, we still need to check threads in the next set
                     // to support things like greedy matching.
+                    if !matches.is_empty() {
+                        for j in i+1..clist.set.len() {
+                            use inst::Inst::*;
+
+                            let ip = clist.set[j];
+                            let tcaps = clist.caps(ip);
+                            if let Match(match_slot) = self.prog.insts[ip] {
+                                println!("B1: {:?}", caps);
+                                println!("B2: {:?}: {:?}", ip, tcaps);
+                                for (slot, val) in caps.iter_mut().zip(tcaps.iter()) {
+                                    *slot = *val;
+                                }
+                                matches[match_slot] = true;
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -208,6 +240,7 @@ impl<'r, I: Input> Nfa<'r, I> {
         &mut self,
         nlist: &mut Threads,
         caps: &mut [Option<usize>],
+        matches: &mut [bool],
         thread_caps: &mut [Option<usize>],
         ip: usize,
         at: InputAt,
@@ -215,10 +248,12 @@ impl<'r, I: Input> Nfa<'r, I> {
     ) -> bool {
         use inst::Inst::*;
         match self.prog.insts[ip] {
-            Match => {
+            Match(match_slot) => {
+                println!("A: {:?}: {:?}", ip, thread_caps);
                 for (slot, val) in caps.iter_mut().zip(thread_caps.iter()) {
                     *slot = *val;
                 }
+                matches[match_slot] = true;
                 true
             }
             Char(ref inst) => {
@@ -312,7 +347,7 @@ impl<'r, I: Input> Nfa<'r, I> {
                     self.stack.push(FollowEpsilon::IP(inst.goto2));
                     ip = inst.goto1;
                 }
-                Match | Char(_) | Ranges(_) | Bytes(_) => {
+                Match(_) | Char(_) | Ranges(_) | Bytes(_) => {
                     let mut t = &mut nlist.caps(ip);
                     for (slot, val) in t.iter_mut().zip(thread_caps.iter()) {
                         *slot = *val;

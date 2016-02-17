@@ -312,9 +312,9 @@ impl Exec {
         start: usize,
     ) -> bool {
         if self.prog.insts.is_bytes() {
-            Nfa::exec(&self.prog, caps, ByteInput::new(text), start)
+            Nfa::exec(&self.prog, caps, &mut [], ByteInput::new(text), start)
         } else {
-            Nfa::exec(&self.prog, caps, CharInput::new(text), start)
+            Nfa::exec(&self.prog, caps, &mut [], CharInput::new(text), start)
         }
     }
 
@@ -372,7 +372,7 @@ impl Exec {
     ///
     /// Any capture that isn't named is None.
     pub fn capture_names(&self) -> &[Option<String>] {
-        &self.prog.cap_names
+        &self.prog.insts.capture_names()
     }
 
     /// Return a fresh allocation for storing all possible captures in the

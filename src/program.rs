@@ -11,7 +11,7 @@
 use syntax;
 
 use backtrack::BacktrackCache;
-use compile::{Compiled, Compiler};
+use compile::Compiler;
 use dfa::DfaCache;
 use inst::Insts;
 use nfa::NfaCache;
@@ -36,9 +36,6 @@ pub struct Program {
     pub original: String,
     /// A sequence of instructions.
     pub insts: Insts,
-    /// The sequence of capture group names. There is an entry for each capture
-    /// group index and a name exists only if the capture group is named.
-    pub cap_names: Vec<Option<String>>,
     /// If the regular expression requires a literal prefix in order to have a
     /// match, that prefix is stored here as a DFA.
     pub prefixes: Literals,
@@ -130,7 +127,7 @@ impl ProgramBuilder {
     fn compile_one(mut self) -> Result<Program, Error> {
         debug_assert!(self.res.len() == 1);
         let expr = try!(syntax::Expr::parse(&self.res[0]));
-        let Compiled { insts, cap_names } = try!(self.compiler.compile(&expr));
+        let insts = try!(self.compiler.compile(&expr));
         let (prefixes, anchored_begin, anchored_end) = (
             insts.prefix_matcher(),
             insts.anchored_begin(),
@@ -139,7 +136,6 @@ impl ProgramBuilder {
         Ok(Program {
             original: self.res.pop().unwrap(),
             insts: insts,
-            cap_names: cap_names,
             prefixes: prefixes,
             anchored_begin: anchored_begin,
             anchored_end: anchored_end,
@@ -158,8 +154,7 @@ impl ProgramBuilder {
         for re in &self.res {
             exprs.push(try!(syntax::Expr::parse(re)));
         }
-        let Compiled { insts, cap_names } =
-            try!(self.compiler.compile_many(&exprs));
+        let insts = try!(self.compiler.compile_many(&exprs));
         let (prefixes, anchored_begin, anchored_end) = (
             insts.prefix_matcher(),
             insts.anchored_begin(),
@@ -168,7 +163,6 @@ impl ProgramBuilder {
         Ok(Program {
             original: original,
             insts: insts,
-            cap_names: cap_names,
             prefixes: prefixes,
             anchored_begin: anchored_begin,
             anchored_end: anchored_end,
@@ -195,7 +189,12 @@ impl Program {
     /// Returns the total number of capture groups in the regular expression.
     /// This includes the zeroth capture.
     pub fn num_captures(&self) -> usize {
-        self.cap_names.len()
+        self.insts.capture_names().len()
+    }
+
+    /// Returns the capture names in this program.
+    pub fn capture_names(&self) -> &[Option<String>] {
+        self.insts.capture_names()
     }
 
     /// Allocate new capture groups.

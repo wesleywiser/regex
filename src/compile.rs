@@ -21,11 +21,6 @@ use inst::{
     InstSave, InstSplit, InstEmptyLook, InstChar, InstRanges, InstBytes,
 };
 
-pub struct Compiled {
-    pub insts: Insts,
-    pub cap_names: Vec<Option<String>>,
-}
-
 type InstHoleIdx = InstPtr;
 
 type Result = result::Result<Patch, Error>;
@@ -39,6 +34,9 @@ struct Patch {
 pub struct Compiler {
     insts: Vec<MaybeInst>,
     cap_names: Vec<Option<String>>,
+    matches: Vec<InstPtr>,
+    start: usize,
+    capture_offset: usize,
     seen_caps: HashSet<usize>,
     size_limit: usize,
     bytes: bool,
@@ -56,7 +54,10 @@ impl Compiler {
     pub fn new() -> Self {
         Compiler {
             insts: vec![],
-            cap_names: vec![None],
+            cap_names: vec![],
+            matches: vec![],
+            start: 0,
+            capture_offset: 0,
             seen_caps: HashSet::new(),
             size_limit: 10 * (1 << 20),
             bytes: false,
@@ -117,7 +118,11 @@ impl Compiler {
     /// The compiler is guaranteed to succeed unless the program exceeds the
     /// specified size limit. If the size limit is exceeded, then compilation
     /// stops and returns an error.
-    pub fn compile(mut self, expr: &Expr) -> result::Result<Compiled, Error> {
+    pub fn compile(mut self, expr: &Expr) -> result::Result<Insts, Error> {
+        // If we're compiling a forward DFA and we aren't anchored, then
+        // add a `.*?` before the first capture group.
+        // Other matching engines handle this by baking the logic into the
+        // matching engine itself.
         if self.dfa && !self.reverse && !expr.is_anchored_start() {
             let patch = try!(self.c(&Expr::Repeat {
                 e: Box::new(Expr::AnyChar),
@@ -126,23 +131,68 @@ impl Compiler {
             }));
             self.fill_to_next(patch.hole);
         }
+        self.cap_names = vec![None];
+        self.start = self.insts.len();
         let patch = try!(self.c_capture(0, expr));
         self.fill_to_next(patch.hole);
-        self.push_compiled(Inst::Match);
-
-        let byte_classes = self.byte_classes.byte_classes();
-        let insts = self.insts.into_iter().map(|inst| inst.unwrap()).collect();
-        Ok(Compiled {
-            insts: Insts::new(insts, self.bytes, self.reverse, byte_classes),
-            cap_names: self.cap_names,
-        })
+        self.matches = vec![self.insts.len()];
+        self.push_compiled(Inst::Match(0));
+        self.compile_finish()
     }
 
     pub fn compile_many(
         mut self,
         exprs: &[Expr],
-    ) -> result::Result<Compiled, Error> {
-        unreachable!()
+    ) -> result::Result<Insts, Error> {
+        debug_assert!(exprs.len() > 1);
+
+        let anchored = exprs.iter().all(|e| e.is_anchored_start());
+        if self.dfa && !self.reverse && !anchored {
+            let patch = try!(self.c(&Expr::Repeat {
+                e: Box::new(Expr::AnyChar),
+                r: Repeater::ZeroOrMore,
+                greedy: false,
+            }));
+            self.fill_to_next(patch.hole);
+        }
+
+        self.start = self.insts.len();
+        for (i, expr) in exprs[0..exprs.len() - 1].iter().enumerate() {
+            let split = self.push_split_hole();
+            let capi = self.cap_names.len();
+            self.capture_offset = 2 * capi;
+            self.cap_names.push(None);
+            let Patch { hole, entry } = try!(self.c_capture(2 * capi, expr));
+            self.fill_to_next(hole);
+            self.matches.push(self.insts.len());
+            self.push_compiled(Inst::Match(i));
+
+            let next = self.insts.len();
+            self.fill_split(split, Some(entry), Some(next));
+        }
+        let capi = self.cap_names.len();
+        self.capture_offset = 2 * capi;
+        self.cap_names.push(None);
+        let patch = try!(self.c_capture(2 * capi, &exprs[exprs.len() - 1]));
+        self.fill_to_next(patch.hole);
+        self.matches.push(self.insts.len());
+        self.push_compiled(Inst::Match(exprs.len().checked_sub(1).unwrap()));
+
+        self.compile_finish()
+    }
+
+    fn compile_finish(self) -> result::Result<Insts, Error> {
+        let byte_classes = self.byte_classes.byte_classes();
+        let insts = self.insts.into_iter().map(|inst| inst.unwrap()).collect();
+        Ok(Insts::new(
+            insts,
+            self.cap_names,
+            self.matches,
+            self.start,
+            self.bytes,
+            self.reverse,
+            byte_classes,
+        ))
     }
 
     fn c(&mut self, expr: &Expr) -> Result {
@@ -206,7 +256,8 @@ impl Compiler {
                     self.cap_names.push(name.clone());
                     self.seen_caps.insert(i);
                 }
-                self.c_capture(2 * i, e)
+                let capi = self.capture_offset + (2 * i);
+                self.c_capture(capi, e)
             }
             Concat(ref es) => {
                 if self.reverse {
