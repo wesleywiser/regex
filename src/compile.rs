@@ -37,6 +37,8 @@ pub struct Compiler {
     matches: Vec<InstPtr>,
     start: usize,
     capture_offset: usize,
+    capture_range: Vec<(usize, usize)>,
+    last_capture: usize,
     seen_caps: HashSet<usize>,
     size_limit: usize,
     bytes: bool,
@@ -58,6 +60,8 @@ impl Compiler {
             matches: vec![],
             start: 0,
             capture_offset: 0,
+            capture_range: vec![],
+            last_capture: 0,
             seen_caps: HashSet::new(),
             size_limit: 10 * (1 << 20),
             bytes: false,
@@ -137,6 +141,8 @@ impl Compiler {
         self.fill_to_next(patch.hole);
         self.matches = vec![self.insts.len()];
         self.push_compiled(Inst::Match(0));
+        let capture_end = self.last_capture;
+        self.capture_range.push((0, capture_end + 1));
         self.compile_finish()
     }
 
@@ -158,6 +164,8 @@ impl Compiler {
 
         self.start = self.insts.len();
         for (i, expr) in exprs[0..exprs.len() - 1].iter().enumerate() {
+            let capture_start = self.last_capture;
+
             let split = self.push_split_hole();
             let capi = self.cap_names.len();
             self.capture_offset = 2 * capi;
@@ -167,9 +175,14 @@ impl Compiler {
             self.matches.push(self.insts.len());
             self.push_compiled(Inst::Match(i));
 
+            let capture_end = self.last_capture;
+            self.capture_range.push((capture_start, capture_end + 1));
+            self.last_capture += 1;
+
             let next = self.insts.len();
             self.fill_split(split, Some(entry), Some(next));
         }
+        let capture_start = self.last_capture;
         let capi = self.cap_names.len();
         self.capture_offset = 2 * capi;
         self.cap_names.push(None);
@@ -177,6 +190,9 @@ impl Compiler {
         self.fill_to_next(patch.hole);
         self.matches.push(self.insts.len());
         self.push_compiled(Inst::Match(exprs.len().checked_sub(1).unwrap()));
+
+        let capture_end = self.last_capture;
+        self.capture_range.push((capture_start, capture_end + 1));
 
         self.compile_finish()
     }
@@ -187,6 +203,7 @@ impl Compiler {
         Ok(Insts::new(
             insts,
             self.cap_names,
+            self.capture_range,
             self.matches,
             self.start,
             self.bytes,
@@ -278,6 +295,9 @@ impl Compiler {
         self.fill(hole, patch.entry);
         self.fill_to_next(patch.hole);
         let hole = self.push_hole(InstHole::Save { slot: first_slot + 1 });
+        if first_slot + 1 > self.last_capture {
+            self.last_capture = first_slot + 1;
+        }
         Ok(Patch { hole: hole, entry: entry })
     }
 

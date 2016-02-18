@@ -27,6 +27,7 @@
 
 use std::mem;
 
+use exec::Search;
 use input::{Input, InputAt};
 use inst::InstPtr;
 use program::Program;
@@ -35,7 +36,7 @@ use sparse::SparseSet;
 
 /// An NFA simulation matching engine.
 #[derive(Debug)]
-pub struct Nfa<'r, I> {
+pub struct Nfa<'r, T> {
     /// The sequence of opcodes (among other things) that is actually executed.
     ///
     /// The program may be byte oriented or Unicode codepoint oriented.
@@ -43,8 +44,8 @@ pub struct Nfa<'r, I> {
     /// An explicit stack used for following epsilon transitions. (This is
     /// borrowed from the cache.)
     stack: &'r mut Vec<FollowEpsilon>,
-    /// The input to search.
-    input: I,
+    /// The input text to search.
+    text: T,
 }
 
 /// A cached allocation that can be reused on each execution.
@@ -94,42 +95,34 @@ impl NfaCache {
     }
 }
 
-impl<'r, I: Input> Nfa<'r, I> {
+impl<'r, T: Input> Nfa<'r, T> {
     /// Execute the NFA matching engine.
     ///
     /// If there's a match, `exec` returns `true` and populates the given
     /// captures accordingly.
-    pub fn exec(
+    pub fn exec<'caps, 'matches>(
         prog: &'r Program,
-        mut caps: &mut CaptureIdxs,
-        mut matches: &mut [bool],
-        input: I,
+        text: T,
         start: usize,
+        search: Search<'caps, 'matches>,
     ) -> bool {
         let mut _cache = prog.cache_nfa();
         let mut cache = &mut **_cache;
         cache.clist.resize(prog.insts.len(), prog.num_captures());
         cache.nlist.resize(prog.insts.len(), prog.num_captures());
-        let at = input.at(start);
+        let at = text.at(start);
         Nfa {
             prog: prog,
             stack: &mut cache.stack,
-            input: input,
-        }.exec_(
-            &mut cache.clist,
-            &mut cache.nlist,
-            &mut caps,
-            &mut matches,
-            at,
-        )
+            text: text,
+        }.exec_(&mut cache.clist, &mut cache.nlist, search, at)
     }
 
-    fn exec_(
+    fn exec_<'caps, 'matches>(
         &mut self,
         mut clist: &mut Threads,
         mut nlist: &mut Threads,
-        mut caps: &mut CaptureIdxs,
-        mut matches: &mut [bool],
+        mut search: Search<'caps, 'matches>,
         mut at: InputAt,
     ) -> bool {
         let mut matched = false;
@@ -154,7 +147,7 @@ impl<'r, I: Input> Nfa<'r, I> {
                 //    jump ahead quickly. If it can't be found, then we can
                 //    bail out early.
                 if !self.prog.prefixes.is_empty() {
-                    at = match self.input.prefix_at(&self.prog.prefixes, at) {
+                    at = match self.text.prefix_at(&self.prog.prefixes, at) {
                         None => break,
                         Some(at) => at,
                     };
@@ -166,19 +159,18 @@ impl<'r, I: Input> Nfa<'r, I> {
             // beginning of the program only if we don't already have a match.
             if clist.set.is_empty()
                 || (!self.prog.anchored_begin && !matched) {
-                self.add(&mut clist, &mut caps, 0, at)
+                self.add(&mut clist, search.caps, 0, at)
             }
             // The previous call to "add" actually inspects the position just
             // before the current character. For stepping through the machine,
             // we can to look at the current character, so we advance the
             // input.
-            let at_next = self.input.at(at.next_pos());
+            let at_next = self.text.at(at.next_pos());
             for i in 0..clist.set.len() {
                 let ip = clist.set[i];
                 let m = self.step(
+                    &mut search,
                     &mut nlist,
-                    caps,
-                    matches,
                     &mut clist.caps(ip),
                     ip,
                     at,
@@ -186,7 +178,7 @@ impl<'r, I: Input> Nfa<'r, I> {
                 );
                 if m {
                     matched = true;
-                    if caps.is_empty() && matches.is_empty() {
+                    if search.caps.is_empty() && search.matches.len() == 1 {
                         // If we only care if a match occurs (not its
                         // position), then we can quit right now.
                         break 'LOOP;
@@ -195,21 +187,8 @@ impl<'r, I: Input> Nfa<'r, I> {
                     // set because we've matched something ("leftmost-first").
                     // However, we still need to check threads in the next set
                     // to support things like greedy matching.
-                    if !matches.is_empty() {
-                        for j in i+1..clist.set.len() {
-                            use inst::Inst::*;
-
-                            let ip = clist.set[j];
-                            let tcaps = clist.caps(ip);
-                            if let Match(match_slot) = self.prog.insts[ip] {
-                                println!("B1: {:?}", caps);
-                                println!("B2: {:?}: {:?}", ip, tcaps);
-                                for (slot, val) in caps.iter_mut().zip(tcaps.iter()) {
-                                    *slot = *val;
-                                }
-                                matches[match_slot] = true;
-                            }
-                        }
+                    if search.matches.len() > 1 {
+                        self.set_matches(&mut search, clist, i);
                     }
                     break;
                 }
@@ -224,6 +203,27 @@ impl<'r, I: Input> Nfa<'r, I> {
         matched
     }
 
+    fn set_matches(
+        &self,
+        search: &mut Search,
+        clist: &mut Threads,
+        thread_last_match: usize,
+    ) {
+        use inst::Inst::*;
+
+        for i in thread_last_match+1..clist.set.len() {
+            let ip = clist.set[i];
+            let tcaps = clist.caps(ip);
+            if let Match(match_slot) = self.prog.insts[ip] {
+                let (s, e) = self.prog.insts.match_group_range(match_slot);
+                for (slot, val) in search.caps[s..e].iter_mut().zip(tcaps[s..e].iter()) {
+                    *slot = *val;
+                }
+                search.matches[match_slot] = true;
+            }
+        }
+    }
+
     /// Step through the input, one token (byte or codepoint) at a time.
     ///
     /// nlist is the set of states that will be processed on the next token
@@ -236,11 +236,10 @@ impl<'r, I: Input> Nfa<'r, I> {
     ///
     /// at and at_next are the current and next positions in the input. at or
     /// at_next may be EOF.
-    fn step(
+    fn step<'caps, 'matches>(
         &mut self,
+        search: &mut Search<'caps, 'matches>,
         nlist: &mut Threads,
-        caps: &mut [Option<usize>],
-        matches: &mut [bool],
         thread_caps: &mut [Option<usize>],
         ip: usize,
         at: InputAt,
@@ -249,11 +248,11 @@ impl<'r, I: Input> Nfa<'r, I> {
         use inst::Inst::*;
         match self.prog.insts[ip] {
             Match(match_slot) => {
-                println!("A: {:?}: {:?}", ip, thread_caps);
-                for (slot, val) in caps.iter_mut().zip(thread_caps.iter()) {
+                let (s, e) = self.prog.insts.match_group_range(match_slot);
+                for (slot, val) in search.caps[s..e].iter_mut().zip(thread_caps[s..e].iter()) {
                     *slot = *val;
                 }
-                matches[match_slot] = true;
+                search.matches[match_slot] = true;
                 true
             }
             Char(ref inst) => {
@@ -327,8 +326,8 @@ impl<'r, I: Input> Nfa<'r, I> {
             nlist.set.add(ip);
             match self.prog.insts[ip] {
                 EmptyLook(ref inst) => {
-                    let prev = self.input.previous_char(at);
-                    let next = self.input.next_char(at);
+                    let prev = self.text.previous_char(at);
+                    let next = self.text.next_char(at);
                     if inst.matches(prev, next) {
                         ip = inst.goto;
                     }

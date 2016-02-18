@@ -15,6 +15,7 @@ pub type InstPtr = usize;
 pub struct Insts {
     insts: Vec<Inst>,
     capture_names: Vec<Option<String>>,
+    capture_range: Vec<(usize, usize)>,
     matches: Vec<InstPtr>,
     start: InstPtr,
     bytes: bool,
@@ -32,6 +33,7 @@ impl Insts {
     pub fn new(
         insts: Vec<Inst>,
         capture_names: Vec<Option<String>>,
+        capture_range: Vec<(usize, usize)>,
         matches: Vec<InstPtr>,
         start: InstPtr,
         bytes: bool,
@@ -42,6 +44,7 @@ impl Insts {
         Insts {
             insts: insts,
             capture_names: capture_names,
+            capture_range: capture_range,
             matches: matches,
             start: start,
             bytes: bytes,
@@ -112,6 +115,10 @@ impl Insts {
 
     pub fn matches(&self) -> &[InstPtr] {
         &self.matches
+    }
+
+    pub fn match_group_range(&self, match_slot: usize) -> (usize, usize) {
+        self.capture_range[match_slot]
     }
 
     /// Return true if and only if the regex is anchored at the start of

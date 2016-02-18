@@ -26,6 +26,7 @@
 // the bitset has to be zeroed on each execution, which becomes quite expensive
 // on large bitsets.
 
+use exec::Search;
 use input::{Input, InputAt};
 use inst::InstPtr;
 use program::Program;
@@ -51,11 +52,11 @@ const MAX_INPUT_SIZE: usize = 128 * (1 << 10);
 
 /// A backtracking matching engine.
 #[derive(Debug)]
-pub struct Backtrack<'a, 'r, 'c, I> {
-    prog: &'r Program,
-    input: I,
-    caps: &'c mut CaptureIdxs,
-    m: &'a mut BacktrackCache,
+pub struct Backtrack<'cache, 'caps, 'matches, 'p, T> {
+    prog: &'p Program,
+    cache: &'cache mut BacktrackCache,
+    search: Search<'caps, 'matches>,
+    text: T,
 }
 
 /// Shared cached state between multiple invocations of a backtracking engine
@@ -85,24 +86,24 @@ enum Job {
     SaveRestore { slot: usize, old_pos: Option<usize> },
 }
 
-impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
+impl<'cache, 'c, 'm, 'p, T: Input> Backtrack<'cache, 'c, 'm, 'p, T> {
     /// Execute the backtracking matching engine.
     ///
     /// If there's a match, `exec` returns `true` and populates the given
     /// captures accordingly.
     pub fn exec(
-        prog: &'r Program,
-        mut caps: &mut CaptureIdxs,
-        input: I,
+        prog: &'p Program,
+        text: T,
         start: usize,
+        search: Search<'c, 'm>,
     ) -> bool {
-        let start = input.at(start);
-        let mut m = prog.cache_backtrack();
+        let start = text.at(start);
+        let mut cache = prog.cache_backtrack();
         let mut b = Backtrack {
             prog: prog,
-            input: input,
-            caps: caps,
-            m: &mut m,
+            cache: &mut cache,
+            search: search,
+            text: text,
         };
         b.exec_(start)
     }
@@ -111,7 +112,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
     /// on some input of fixed length.
     fn clear(&mut self) {
         // Reset the job memory so that we start fresh.
-        self.m.jobs.clear();
+        self.cache.jobs.clear();
 
         // Now we need to clear the bit state set.
         // We do this by figuring out how much space we need to keep track
@@ -124,18 +125,18 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
         // (Probably because backtracking is limited to such small
         // inputs/regexes in the first place.)
         let visited_len =
-            (self.prog.insts.len() * (self.input.len() + 1) + BIT_SIZE - 1)
+            (self.prog.insts.len() * (self.text.len() + 1) + BIT_SIZE - 1)
             /
             BIT_SIZE;
-        self.m.visited.truncate(visited_len);
-        for v in &mut self.m.visited {
+        self.cache.visited.truncate(visited_len);
+        for v in &mut self.cache.visited {
             *v = 0;
         }
-        if visited_len > self.m.visited.len() {
-            let len = self.m.visited.len();
-            self.m.visited.reserve_exact(visited_len - len);
+        if visited_len > self.cache.visited.len() {
+            let len = self.cache.visited.len();
+            self.cache.visited.reserve_exact(visited_len - len);
             for _ in 0..(visited_len - len) {
-                self.m.visited.push(0);
+                self.cache.visited.push(0);
             }
         }
     }
@@ -155,7 +156,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
         }
         loop {
             if !self.prog.prefixes.is_empty() {
-                at = match self.input.prefix_at(&self.prog.prefixes, at) {
+                at = match self.text.prefix_at(&self.prog.prefixes, at) {
                     None => return false,
                     Some(at) => at,
                 };
@@ -166,7 +167,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
             if at.is_end() {
                 return false;
             }
-            at = self.input.at(at.next_pos());
+            at = self.text.at(at.next_pos());
         }
     }
 
@@ -179,8 +180,8 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
         // To avoid excessive pushing and popping, most transitions are handled
         // in the `step` helper function, which only pushes to the stack when
         // there's a capture or a branch.
-        self.m.jobs.push(Job::Inst { ip: 0, at: start });
-        while let Some(job) = self.m.jobs.pop() {
+        self.cache.jobs.push(Job::Inst { ip: 0, at: start });
+        while let Some(job) = self.cache.jobs.pop() {
             match job {
                 Job::Inst { ip, at } => {
                     if self.step(ip, at) {
@@ -188,7 +189,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
                     }
                 }
                 Job::SaveRestore { slot, old_pos } => {
-                    self.caps[slot] = old_pos;
+                    self.search.caps[slot] = old_pos;
                 }
             }
         }
@@ -204,31 +205,31 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
             // in place.
             match self.prog.insts[ip] {
                 Match(slot) => {
-                    debug_assert!(slot == 0);
+                    self.search.matches[slot] = true;
                     return true;
                 }
                 Save(ref inst) => {
-                    if inst.slot < self.caps.len() {
+                    if inst.slot < self.search.caps.len() {
                         // If this path doesn't work out, then we save the old
                         // capture index (if one exists) in an alternate
                         // job. If the next path fails, then the alternate
                         // job is popped and the old capture index is restored.
-                        let old_pos = self.caps[inst.slot];
-                        self.m.jobs.push(Job::SaveRestore {
+                        let old_pos = self.search.caps[inst.slot];
+                        self.cache.jobs.push(Job::SaveRestore {
                             slot: inst.slot,
                             old_pos: old_pos,
                         });
-                        self.caps[inst.slot] = Some(at.pos());
+                        self.search.caps[inst.slot] = Some(at.pos());
                     }
                     ip = inst.goto;
                 }
                 Split(ref inst) => {
-                    self.m.jobs.push(Job::Inst { ip: inst.goto2, at: at });
+                    self.cache.jobs.push(Job::Inst { ip: inst.goto2, at: at });
                     ip = inst.goto1;
                 }
                 EmptyLook(ref inst) => {
-                    let prev = self.input.previous_char(at);
-                    let next = self.input.next_char(at);
+                    let prev = self.text.previous_char(at);
+                    let next = self.text.next_char(at);
                     if inst.matches(prev, next) {
                         ip = inst.goto;
                     } else {
@@ -238,7 +239,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
                 Char(ref inst) => {
                     if inst.c == at.char() {
                         ip = inst.goto;
-                        at = self.input.at(at.next_pos());
+                        at = self.text.at(at.next_pos());
                     } else {
                         return false;
                     }
@@ -246,7 +247,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
                 Ranges(ref inst) => {
                     if inst.matches(at.char()) {
                         ip = inst.goto;
-                        at = self.input.at(at.next_pos());
+                        at = self.text.at(at.next_pos());
                     } else {
                         return false;
                     }
@@ -255,7 +256,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
                     if let Some(b) = at.byte() {
                         if inst.matches(b) {
                             ip = inst.goto;
-                            at = self.input.at(at.next_pos());
+                            at = self.text.at(at.next_pos());
                             continue;
                         }
                     }
@@ -269,11 +270,11 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
     }
 
     fn has_visited(&mut self, ip: InstPtr, at: InputAt) -> bool {
-        let k = ip * (self.input.len() + 1) + at.pos();
+        let k = ip * (self.text.len() + 1) + at.pos();
         let k1 = k / BIT_SIZE;
         let k2 = usize_to_u32(1 << (k & (BIT_SIZE - 1)));
-        if self.m.visited[k1] & k2 == 0 {
-            self.m.visited[k1] |= k2;
+        if self.cache.visited[k1] & k2 == 0 {
+            self.cache.visited[k1] |= k2;
             false
         } else {
             true

@@ -17,6 +17,24 @@ use re::CaptureIdxs;
 
 use {Regex, Error};
 
+/// The parameters to running one of the four match engines.
+#[derive(Debug)]
+pub struct Search<'c, 'm> {
+    /// The matching engine writes capture locations to this slice.
+    ///
+    /// Note that some matching engines, like the DFA, have limited support
+    /// for this. The DFA can only fill in one capture location (the end
+    /// location of the match).
+    pub caps: &'c mut [Option<usize>],
+    /// The matching engine indicates which match instructions were executed
+    /// when searching stopped.
+    ///
+    /// In standard searches, there is exactly one value in this slice and it
+    /// should be initialized to `false`. When executing sets of regexes,
+    /// there should be a location for each regex.
+    pub matches: &'m mut [bool],
+}
+
 /// Exec manages the execution of a regular expression.
 ///
 /// In particular, this manages the various compiled forms of a single regular
@@ -312,9 +330,15 @@ impl Exec {
         start: usize,
     ) -> bool {
         if self.prog.insts.is_bytes() {
-            Nfa::exec(&self.prog, caps, &mut [], ByteInput::new(text), start)
+            Nfa::exec(&self.prog, ByteInput::new(text), start, Search {
+                caps: caps,
+                matches: &mut [false],
+            })
         } else {
-            Nfa::exec(&self.prog, caps, &mut [], CharInput::new(text), start)
+            Nfa::exec(&self.prog, CharInput::new(text), start, Search {
+                caps: caps,
+                matches: &mut [false],
+            })
         }
     }
 
@@ -326,9 +350,15 @@ impl Exec {
         start: usize,
     ) -> bool {
         if self.prog.insts.is_bytes() {
-            Backtrack::exec(&self.prog, caps, ByteInput::new(text), start)
+            Backtrack::exec(&self.prog, ByteInput::new(text), start, Search {
+                caps: caps,
+                matches: &mut [false],
+            })
         } else {
-            Backtrack::exec(&self.prog, caps, CharInput::new(text), start)
+            Backtrack::exec(&self.prog, CharInput::new(text), start, Search {
+                caps: caps,
+                matches: &mut [false],
+            })
         }
     }
 

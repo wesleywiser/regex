@@ -9,6 +9,7 @@
 // except according to those terms.
 
 use dfa;
+use exec::Search;
 use input::{ByteInput, CharInput};
 use nfa::Nfa;
 use program::{Program, ProgramBuilder};
@@ -93,11 +94,15 @@ impl SetExec {
     ) -> bool {
         let mut matches = vec![false; self.prog.insts.matches().len()];
         let m = if self.prog.insts.is_bytes() {
-            Nfa::exec(
-                &self.prog, caps, &mut matches, ByteInput::new(text), start)
+            Nfa::exec(&self.prog, ByteInput::new(text), start, Search {
+                caps: caps,
+                matches: &mut matches,
+            })
         } else {
-            Nfa::exec(
-                &self.prog, caps, &mut matches, CharInput::new(text), start)
+            Nfa::exec(&self.prog, CharInput::new(text), start, Search {
+                caps: caps,
+                matches: &mut matches,
+            })
         };
         println!("MATCHES: {:?}", matches);
         m
