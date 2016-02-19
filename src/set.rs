@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use exec::Search;
 use set_exec::{SetExec, SetExecBuilder};
 
 use Error;
@@ -36,8 +37,17 @@ pub struct RegexSet(SetExec);
 impl RegexSet {
     pub fn is_match(&self, text: &str) -> bool {
         let mut caps = self.0.alloc_captures();
-        let m = self.0.exec(&mut caps, text, 0);
+        let mut matches = vec![false; self.0.prog.insts.matches().len()];
+        let m = {
+            let search = Search {
+                caps: &mut caps,
+                caps_per_regex: 2,
+                matches: &mut matches,
+            };
+            self.0.exec(search, text, 0)
+        };
         println!("CAPS: {:?}", caps);
+        println!("MATCHES: {:?}", matches);
         m
     }
 }

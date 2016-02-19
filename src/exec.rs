@@ -19,20 +19,65 @@ use {Regex, Error};
 
 /// The parameters to running one of the four match engines.
 #[derive(Debug)]
-pub struct Search<'c, 'm> {
+pub struct Search<'caps, 'matches> {
     /// The matching engine writes capture locations to this slice.
     ///
     /// Note that some matching engines, like the DFA, have limited support
     /// for this. The DFA can only fill in one capture location (the end
     /// location of the match).
-    pub caps: &'c mut [Option<usize>],
+    pub caps: &'caps mut [Option<usize>],
+    /// The number of captures requested per regex.
+    ///
+    /// For a single, this should always equal caps.len().
+    pub caps_per_regex: usize,
     /// The matching engine indicates which match instructions were executed
     /// when searching stopped.
     ///
     /// In standard searches, there is exactly one value in this slice and it
     /// should be initialized to `false`. When executing sets of regexes,
     /// there should be a location for each regex.
-    pub matches: &'m mut [bool],
+    pub matches: &'matches mut [bool],
+}
+
+impl<'c, 'm> Search<'c, 'm> {
+    pub fn copy_to_match(
+        &mut self,
+        prog: &Program,
+        match_slot: usize,
+        caps: &[Option<usize>],
+    ) {
+        // BREADCRUMBS:
+        // OK, so the issue here is that we don't really know which capture
+        // slots belong to which regex. We tried by creating a map from match
+        // slot to capture slot range, but this doesn't hold up because the
+        // capture slots vary based on the callers' needs. For example, the
+        // captures might be empty (is_match), or they might have two slots
+        // per regex (find_iter) or they might have slots for every capture
+        // (captures).
+        //
+        // The only thing I can think of is that captures needs to be layered.
+        // Instead of a contiguous sequence, we could split it up into several
+        // sequences---one for each regex. This suggests a
+        // `Vec<Vec<Option<usize>>>`.
+        //
+        // This is itself problematic because we don't want to be forced into
+        // allocating slots for captures for everything.
+        //
+        // Instead, perhaps we should store captures in row-major order. This
+        // struct would then need to store the number of captures desired for
+        // each regex (columns). Each regex is a single row. We should then
+        // be able to set captures with
+        //
+        //   let s = match_slot * caps_per_regex;
+        //   let e = s + caps_per_regex + 1;
+        //   memcpy(self.caps[s..e], caps[s..e]);
+        let s = match_slot * self.caps_per_regex;
+        let e = s + self.caps_per_regex;
+        for (slot, val) in self.caps[s..e].iter_mut().zip(caps[s..e].iter()) {
+            *slot = *val;
+        }
+        self.matches[match_slot] = true;
+    }
 }
 
 /// Exec manages the execution of a regular expression.
@@ -329,14 +374,17 @@ impl Exec {
         text: &str,
         start: usize,
     ) -> bool {
+        let cap_len = caps.len();
         if self.prog.insts.is_bytes() {
             Nfa::exec(&self.prog, ByteInput::new(text), start, Search {
                 caps: caps,
+                caps_per_regex: cap_len,
                 matches: &mut [false],
             })
         } else {
             Nfa::exec(&self.prog, CharInput::new(text), start, Search {
                 caps: caps,
+                caps_per_regex: cap_len,
                 matches: &mut [false],
             })
         }
@@ -349,14 +397,17 @@ impl Exec {
         text: &str,
         start: usize,
     ) -> bool {
+        let cap_len = caps.len();
         if self.prog.insts.is_bytes() {
             Backtrack::exec(&self.prog, ByteInput::new(text), start, Search {
                 caps: caps,
+                caps_per_regex: cap_len,
                 matches: &mut [false],
             })
         } else {
             Backtrack::exec(&self.prog, CharInput::new(text), start, Search {
                 caps: caps,
+                caps_per_regex: cap_len,
                 matches: &mut [false],
             })
         }

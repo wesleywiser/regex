@@ -183,13 +183,16 @@ impl<'r, T: Input> Nfa<'r, T> {
                         // position), then we can quit right now.
                         break 'LOOP;
                     }
+                    // If we're running a regex set, then we need to traverse
+                    // the rest of the states and fill in the captures for any
+                    // proceding match states.
+                    if search.matches.len() > 1 {
+                        self.set_matches(&mut search, clist, i);
+                    }
                     // We don't need to check the rest of the threads in this
                     // set because we've matched something ("leftmost-first").
                     // However, we still need to check threads in the next set
                     // to support things like greedy matching.
-                    if search.matches.len() > 1 {
-                        self.set_matches(&mut search, clist, i);
-                    }
                     break;
                 }
             }
@@ -201,27 +204,6 @@ impl<'r, T: Input> Nfa<'r, T> {
             nlist.set.clear();
         }
         matched
-    }
-
-    fn set_matches(
-        &self,
-        search: &mut Search,
-        clist: &mut Threads,
-        thread_last_match: usize,
-    ) {
-        use inst::Inst::*;
-
-        for i in thread_last_match+1..clist.set.len() {
-            let ip = clist.set[i];
-            let tcaps = clist.caps(ip);
-            if let Match(match_slot) = self.prog.insts[ip] {
-                let (s, e) = self.prog.insts.match_group_range(match_slot);
-                for (slot, val) in search.caps[s..e].iter_mut().zip(tcaps[s..e].iter()) {
-                    *slot = *val;
-                }
-                search.matches[match_slot] = true;
-            }
-        }
     }
 
     /// Step through the input, one token (byte or codepoint) at a time.
@@ -248,11 +230,7 @@ impl<'r, T: Input> Nfa<'r, T> {
         use inst::Inst::*;
         match self.prog.insts[ip] {
             Match(match_slot) => {
-                let (s, e) = self.prog.insts.match_group_range(match_slot);
-                for (slot, val) in search.caps[s..e].iter_mut().zip(thread_caps[s..e].iter()) {
-                    *slot = *val;
-                }
-                search.matches[match_slot] = true;
+                search.copy_to_match(&self.prog, match_slot, thread_caps);
                 true
             }
             Char(ref inst) => {
@@ -353,6 +331,24 @@ impl<'r, T: Input> Nfa<'r, T> {
                     }
                     return;
                 }
+            }
+        }
+    }
+
+    /// Copy match captures to the rest of the match instructions in clist.
+    ///
+    /// The first match instruction should be indexed by thread_last_match.
+    fn set_matches(
+        &self,
+        search: &mut Search,
+        clist: &mut Threads,
+        thread_last_match: usize,
+    ) {
+        use inst::Inst::*;
+        for i in thread_last_match+1..clist.set.len() {
+            let ip = clist.set[i];
+            if let Match(match_slot) = self.prog.insts[ip] {
+                search.copy_to_match(&self.prog, match_slot, clist.caps(ip));
             }
         }
     }

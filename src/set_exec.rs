@@ -18,7 +18,7 @@ use re::CaptureIdxs;
 use Error;
 
 pub struct SetExec {
-    prog: Program,
+    pub prog: Program,
     dfa: Program,
     dfa_reverse: Program,
     can_dfa: bool,
@@ -75,42 +75,33 @@ impl SetExecBuilder {
 impl SetExec {
     pub fn exec(
         &self,
-        caps: &mut CaptureIdxs,
+        search: Search,
         text: &str,
         start: usize,
     ) -> bool {
         if self.can_dfa {
-            self.exec_dfa(caps, text, start)
+            self.exec_dfa(search, text, start)
         } else {
-            self.exec_nfa(caps, text, start)
+            self.exec_nfa(search, text, start)
         }
     }
 
     fn exec_nfa(
         &self,
-        caps: &mut CaptureIdxs,
+        search: Search,
         text: &str,
         start: usize,
     ) -> bool {
-        let mut matches = vec![false; self.prog.insts.matches().len()];
-        let m = if self.prog.insts.is_bytes() {
-            Nfa::exec(&self.prog, ByteInput::new(text), start, Search {
-                caps: caps,
-                matches: &mut matches,
-            })
+        if self.prog.insts.is_bytes() {
+            Nfa::exec(&self.prog, ByteInput::new(text), start, search)
         } else {
-            Nfa::exec(&self.prog, CharInput::new(text), start, Search {
-                caps: caps,
-                matches: &mut matches,
-            })
-        };
-        println!("MATCHES: {:?}", matches);
-        m
+            Nfa::exec(&self.prog, CharInput::new(text), start, search)
+        }
     }
 
     fn exec_dfa(
         &self,
-        caps: &mut CaptureIdxs,
+        search: Search,
         text: &str,
         start: usize,
     ) -> bool {
