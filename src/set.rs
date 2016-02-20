@@ -40,8 +40,7 @@ impl RegexSet {
         let mut matches = vec![false; self.0.prog.insts.matches().len()];
         let m = {
             let search = Search {
-                caps: &mut caps,
-                caps_per_regex: 2,
+                captures: &mut *caps,
                 matches: &mut matches,
             };
             self.0.exec(search, text, 0)

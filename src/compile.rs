@@ -33,13 +33,11 @@ struct Patch {
 
 pub struct Compiler {
     insts: Vec<MaybeInst>,
-    cap_names: Vec<Option<String>>,
-    matches: Vec<InstPtr>,
     start: usize,
-    capture_offset: usize,
-    capture_range: Vec<(usize, usize)>,
-    last_capture: usize,
-    seen_caps: HashSet<usize>,
+    captures: Vec<Vec<Option<String>>>,
+    seen_caps: HashSet<(usize, usize)>,
+    matches: Vec<InstPtr>,
+    match_slot: usize,
     size_limit: usize,
     bytes: bool,
     dfa: bool,
@@ -56,13 +54,11 @@ impl Compiler {
     pub fn new() -> Self {
         Compiler {
             insts: vec![],
-            cap_names: vec![],
-            matches: vec![],
             start: 0,
-            capture_offset: 0,
-            capture_range: vec![],
-            last_capture: 0,
+            captures: vec![],
             seen_caps: HashSet::new(),
+            matches: vec![],
+            match_slot: 0,
             size_limit: 10 * (1 << 20),
             bytes: false,
             dfa: false,
@@ -135,14 +131,13 @@ impl Compiler {
             }));
             self.fill_to_next(patch.hole);
         }
-        self.cap_names = vec![None];
+        self.match_slot = 0;
+        self.captures = vec![vec![None]];
         self.start = self.insts.len();
         let patch = try!(self.c_capture(0, expr));
         self.fill_to_next(patch.hole);
         self.matches = vec![self.insts.len()];
         self.push_compiled(Inst::Match(0));
-        let capture_end = self.last_capture;
-        self.capture_range.push((0, capture_end + 1));
         self.compile_finish()
     }
 
@@ -164,35 +159,24 @@ impl Compiler {
 
         self.start = self.insts.len();
         for (i, expr) in exprs[0..exprs.len() - 1].iter().enumerate() {
-            let capture_start = self.last_capture;
-
             let split = self.push_split_hole();
-            let capi = self.cap_names.len();
-            self.capture_offset = 2 * capi;
-            self.cap_names.push(None);
-            let Patch { hole, entry } = try!(self.c_capture(2 * capi, expr));
+            self.match_slot = i;
+            self.captures.push(vec![None]);
+            let Patch { hole, entry } = try!(self.c_capture(0, expr));
             self.fill_to_next(hole);
             self.matches.push(self.insts.len());
             self.push_compiled(Inst::Match(i));
 
-            let capture_end = self.last_capture;
-            self.capture_range.push((capture_start, capture_end + 1));
-            self.last_capture += 1;
-
             let next = self.insts.len();
             self.fill_split(split, Some(entry), Some(next));
         }
-        let capture_start = self.last_capture;
-        let capi = self.cap_names.len();
-        self.capture_offset = 2 * capi;
-        self.cap_names.push(None);
-        let patch = try!(self.c_capture(2 * capi, &exprs[exprs.len() - 1]));
-        self.fill_to_next(patch.hole);
+        let i = exprs.len() - 1;
+        self.match_slot = i;
+        self.captures.push(vec![None]);
+        let Patch { hole, .. } = try!(self.c_capture(0, &exprs[i]));
+        self.fill_to_next(hole);
         self.matches.push(self.insts.len());
-        self.push_compiled(Inst::Match(exprs.len().checked_sub(1).unwrap()));
-
-        let capture_end = self.last_capture;
-        self.capture_range.push((capture_start, capture_end + 1));
+        self.push_compiled(Inst::Match(i));
 
         self.compile_finish()
     }
@@ -202,8 +186,7 @@ impl Compiler {
         let insts = self.insts.into_iter().map(|inst| inst.unwrap()).collect();
         Ok(Insts::new(
             insts,
-            self.cap_names,
-            self.capture_range,
+            self.captures,
             self.matches,
             self.start,
             self.bytes,
@@ -268,13 +251,13 @@ impl Compiler {
             Group { ref e, i: None, name: None } => self.c(e),
             Group { ref e, i, ref name } => {
                 // it's impossible to have a named capture without an index
-                let i = i.expect("capture index");
-                if !self.seen_caps.contains(&i) {
-                    self.cap_names.push(name.clone());
-                    self.seen_caps.insert(i);
+                let capi = i.expect("capture index");
+                let matchi = self.match_slot;
+                if !self.seen_caps.contains(&(matchi, capi)) {
+                    self.captures[matchi].push(name.clone());
+                    self.seen_caps.insert((matchi, capi));
                 }
-                let capi = self.capture_offset + (2 * i);
-                self.c_capture(capi, e)
+                self.c_capture(2 * capi, e)
             }
             Concat(ref es) => {
                 if self.reverse {
@@ -290,14 +273,18 @@ impl Compiler {
 
     fn c_capture(&mut self, first_slot: usize, expr: &Expr) -> Result {
         let entry = self.insts.len();
-        let hole = self.push_hole(InstHole::Save { slot: first_slot });
+        let match_slot = self.match_slot;
+        let hole = self.push_hole(InstHole::Save {
+            match_slot: match_slot,
+            capture_slot: first_slot
+        });
         let patch = try!(self.c(expr));
         self.fill(hole, patch.entry);
         self.fill_to_next(patch.hole);
-        let hole = self.push_hole(InstHole::Save { slot: first_slot + 1 });
-        if first_slot + 1 > self.last_capture {
-            self.last_capture = first_slot + 1;
-        }
+        let hole = self.push_hole(InstHole::Save {
+            match_slot: match_slot,
+            capture_slot: first_slot + 1,
+        });
         Ok(Patch { hole: hole, entry: entry })
     }
 
@@ -687,7 +674,7 @@ impl MaybeInst {
 
 #[derive(Clone, Debug)]
 enum InstHole {
-    Save { slot: usize },
+    Save { match_slot: usize, capture_slot: usize },
     EmptyLook { look: EmptyLook },
     Char { c: char },
     Ranges { ranges: Vec<(char, char)> },
@@ -697,10 +684,13 @@ enum InstHole {
 impl InstHole {
     fn fill(&self, goto: InstPtr) -> Inst {
         match *self {
-            InstHole::Save { slot } => Inst::Save(InstSave {
-                goto: goto,
-                slot: slot,
-            }),
+            InstHole::Save { match_slot, capture_slot } => {
+                Inst::Save(InstSave {
+                    goto: goto,
+                    match_slot: match_slot,
+                    capture_slot: capture_slot,
+                })
+            }
             InstHole::EmptyLook { look } => Inst::EmptyLook(InstEmptyLook {
                 goto: goto,
                 look: look,

@@ -189,17 +189,21 @@ impl Program {
     /// Returns the total number of capture groups in the regular expression.
     /// This includes the zeroth capture.
     pub fn num_captures(&self) -> usize {
-        self.insts.capture_names().len()
+        self.insts.captures[0].len()
     }
 
     /// Returns the capture names in this program.
     pub fn capture_names(&self) -> &[Option<String>] {
-        self.insts.capture_names()
+        &self.insts.captures[0]
     }
 
     /// Allocate new capture groups.
-    pub fn alloc_captures(&self) -> Vec<Option<usize>> {
-        vec![None; 2 * self.num_captures()]
+    pub fn alloc_captures(&self) -> Vec<Vec<Option<usize>>> {
+        let mut caps = vec![];
+        for names in &self.insts.captures {
+            caps.push(vec![None; 2 * names.len()]);
+        }
+        caps
     }
 
     /// Retrieve cached state for NFA execution.

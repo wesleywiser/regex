@@ -13,14 +13,13 @@ pub type InstPtr = usize;
 /// Insts is a sequence of instructions.
 #[derive(Clone)]
 pub struct Insts {
-    insts: Vec<Inst>,
-    capture_names: Vec<Option<String>>,
-    capture_range: Vec<(usize, usize)>,
-    matches: Vec<InstPtr>,
-    start: InstPtr,
-    bytes: bool,
-    reverse: bool,
-    byte_classes: Vec<u8>,
+    pub insts: Vec<Inst>,
+    pub captures: Vec<Vec<Option<String>>>,
+    pub matches: Vec<InstPtr>,
+    pub start: InstPtr,
+    pub bytes: bool,
+    pub reverse: bool,
+    pub byte_classes: Vec<u8>,
 }
 
 impl Insts {
@@ -32,8 +31,7 @@ impl Insts {
     /// A Vec<Inst> can be created with the compiler.
     pub fn new(
         insts: Vec<Inst>,
-        capture_names: Vec<Option<String>>,
-        capture_range: Vec<(usize, usize)>,
+        captures: Vec<Vec<Option<String>>>,
         matches: Vec<InstPtr>,
         start: InstPtr,
         bytes: bool,
@@ -43,8 +41,7 @@ impl Insts {
         assert!(byte_classes.len() == 256);
         Insts {
             insts: insts,
-            capture_names: capture_names,
-            capture_range: capture_range,
+            captures: captures,
             matches: matches,
             start: start,
             bytes: bytes,
@@ -109,16 +106,12 @@ impl Insts {
         }
     }
 
-    pub fn capture_names(&self) -> &[Option<String>] {
-        &self.capture_names
+    pub fn captures(&self) -> &[Vec<Option<String>>] {
+        &self.captures
     }
 
     pub fn matches(&self) -> &[InstPtr] {
         &self.matches
-    }
-
-    pub fn match_group_range(&self, match_slot: usize) -> (usize, usize) {
-        self.capture_range[match_slot]
     }
 
     /// Return true if and only if the regex is anchored at the start of
@@ -199,7 +192,9 @@ impl fmt::Debug for Insts {
                     try!(writeln!(f, "{:04} Match({})", pc, slot));
                 }
                 Save(ref inst) => {
-                    let s = format!("{:04} Save({})", pc, inst.slot);
+                    let s = format!(
+                        "{:04} Save({}, {})",
+                        pc, inst.match_slot, inst.capture_slot);
                     try!(writeln!(f, "{}", with_goto(pc, inst.goto, s)));
                 }
                 Split(ref inst) => {
@@ -296,13 +291,19 @@ pub enum Inst {
 }
 
 /// Representation of the Save instruction.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct InstSave {
     /// The next location to execute in the program.
     pub goto: InstPtr,
     /// The capture slot (there are two slots for every capture in a regex,
     /// including the zeroth capture for the entire match).
-    pub slot: usize,
+    pub capture_slot: usize,
+    /// The match slot.
+    ///
+    /// For normal regexes, this is always `0` since there is ever only one
+    /// Match instruction in a program. For a regex set, each regex has its
+    /// own set of captures.
+    pub match_slot: usize,
 }
 
 /// Representation of the Split instruction.

@@ -26,11 +26,11 @@
 // the bitset has to be zeroed on each execution, which becomes quite expensive
 // on large bitsets.
 
+use captures::CaptureSlots;
 use exec::Search;
 use input::{Input, InputAt};
-use inst::InstPtr;
+use inst::{InstPtr, InstSave};
 use program::Program;
-use re::CaptureIdxs;
 
 /// Returns true iff the given regex and input should be executed by this
 /// engine with reasonable memory usage.
@@ -52,10 +52,10 @@ const MAX_INPUT_SIZE: usize = 128 * (1 << 10);
 
 /// A backtracking matching engine.
 #[derive(Debug)]
-pub struct Backtrack<'cache, 'caps, 'matches, 'p, T> {
+pub struct Backtrack<'cache, 'matches, 'p, T, C> {
     prog: &'p Program,
     cache: &'cache mut BacktrackCache,
-    search: Search<'caps, 'matches>,
+    search: Search<'matches, C>,
     text: T,
 }
 
@@ -83,10 +83,10 @@ impl BacktrackCache {
 #[derive(Clone, Copy, Debug)]
 enum Job {
     Inst { ip: InstPtr, at: InputAt },
-    SaveRestore { slot: usize, old_pos: Option<usize> },
+    SaveRestore { save: InstSave, old_slot: Option<usize> },
 }
 
-impl<'cache, 'c, 'm, 'p, T: Input> Backtrack<'cache, 'c, 'm, 'p, T> {
+impl<'cache, 'm, 'p, T: Input, C: CaptureSlots> Backtrack<'cache, 'm, 'p, T, C> {
     /// Execute the backtracking matching engine.
     ///
     /// If there's a match, `exec` returns `true` and populates the given
@@ -95,7 +95,7 @@ impl<'cache, 'c, 'm, 'p, T: Input> Backtrack<'cache, 'c, 'm, 'p, T> {
         prog: &'p Program,
         text: T,
         start: usize,
-        search: Search<'c, 'm>,
+        search: Search<'m, C>,
     ) -> bool {
         let start = text.at(start);
         let mut cache = prog.cache_backtrack();
@@ -188,8 +188,9 @@ impl<'cache, 'c, 'm, 'p, T: Input> Backtrack<'cache, 'c, 'm, 'p, T> {
                         return true;
                     }
                 }
-                Job::SaveRestore { slot, old_pos } => {
-                    self.search.caps[slot] = old_pos;
+                Job::SaveRestore { save, old_slot } => {
+                    self.search.captures.set_capture(
+                        save.match_slot, save.capture_slot, old_slot);
                 }
             }
         }
@@ -203,23 +204,28 @@ impl<'cache, 'c, 'm, 'p, T: Input> Backtrack<'cache, 'c, 'm, 'p, T> {
             // from the stack. Namely, if we're pushing a job only to run it
             // next, avoid the push and just mutate `ip` (and possibly `at`)
             // in place.
+            println!("{:?}: {:?}", ip, self.prog.insts[ip]);
             match self.prog.insts[ip] {
                 Match(slot) => {
                     self.search.matches[slot] = true;
                     return true;
                 }
                 Save(ref inst) => {
-                    if inst.slot < self.search.caps.len() {
+                    let cap = self.search.captures.capture(
+                        inst.match_slot, inst.capture_slot);
+                    if let Some(old_slot) = cap {
                         // If this path doesn't work out, then we save the old
                         // capture index (if one exists) in an alternate
                         // job. If the next path fails, then the alternate
                         // job is popped and the old capture index is restored.
-                        let old_pos = self.search.caps[inst.slot];
                         self.cache.jobs.push(Job::SaveRestore {
-                            slot: inst.slot,
-                            old_pos: old_pos,
+                            save: *inst,
+                            old_slot: old_slot,
                         });
-                        self.search.caps[inst.slot] = Some(at.pos());
+                        self.search.captures.set_capture(
+                            inst.match_slot,
+                            inst.capture_slot,
+                            Some(at.pos()));
                     }
                     ip = inst.goto;
                 }

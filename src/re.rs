@@ -17,6 +17,7 @@ use std::ops::Index;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use std::str::FromStr;
 
+use captures::CaptureSlotsBorrowed;
 use exec::{Exec, ExecBuilder};
 use syntax;
 
@@ -29,9 +30,6 @@ const REPLACE_EXPAND: &'static str = r"(?x)
     [_a-zA-Z][_0-9a-zA-Z]* # A name for named captures.
   )
 ";
-
-/// Type alias for representing capture indices.
-pub type CaptureIdxs = [Option<usize>];
 
 /// Escapes all regular expression meta characters in `text`.
 ///
@@ -186,7 +184,7 @@ pub struct ExNative {
     #[doc(hidden)]
     pub names: &'static &'static [Option<&'static str>],
     #[doc(hidden)]
-    pub prog: fn(&mut CaptureIdxs, &str, usize) -> bool,
+    pub prog: fn(CaptureSlotsBorrowed, &str, usize) -> bool,
 }
 
 impl Copy for ExNative {}
@@ -268,7 +266,7 @@ impl Regex {
     /// # }
     /// ```
     pub fn is_match(&self, text: &str) -> bool {
-        exec(self, &mut [], text, 0)
+        exec(self, &mut [&mut []], text, 0)
     }
 
     /// Returns the start and end byte range of the leftmost-first match in
@@ -293,7 +291,7 @@ impl Regex {
     /// ```
     pub fn find(&self, text: &str) -> Option<(usize, usize)> {
         let mut caps = [None, None];
-        if exec(self, &mut caps, text, 0) {
+        if exec(self, &mut [&mut caps], text, 0) {
             Some((caps[0].unwrap(), caps[1].unwrap()))
         } else {
             None
@@ -396,7 +394,8 @@ impl Regex {
     /// accessed with `at(0)` or `[0]`.
     pub fn captures<'t>(&self, text: &'t str) -> Option<Captures<'t>> {
         let mut caps = self.alloc_captures();
-        if exec(self, &mut caps, text, 0) {
+        if exec(self, &mut [&mut caps], text, 0) {
+            println!("re.rs:captures: caps: {:?}", caps);
             Some(Captures::new(self, text, caps))
         } else {
             None
@@ -654,7 +653,7 @@ impl Regex {
     fn alloc_captures(&self) -> Vec<Option<usize>> {
         match *self {
             Regex::Native(ref n) => vec![None; 2 * n.names.len()],
-            Regex::Dynamic(ref d) => d.alloc_captures(),
+            Regex::Dynamic(ref d) => vec![None; 2 * d.capture_names().len()],
         }
     }
 }
@@ -1064,7 +1063,7 @@ impl<'r, 't> Iterator for FindCaptures<'r, 't> {
         }
 
         let mut caps = self.re.alloc_captures();
-        if !exec(self.re, &mut caps, self.search, self.last_end) {
+        if !exec(self.re, &mut [&mut caps], self.search, self.last_end) {
             return None
         }
         let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
@@ -1109,7 +1108,7 @@ impl<'r, 't> Iterator for FindMatches<'r, 't> {
         }
 
         let mut caps = [None, None];
-        if !exec(self.re, &mut caps, self.search, self.last_end) {
+        if !exec(self.re, &mut [&mut caps], self.search, self.last_end) {
             return None;
         }
         let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
@@ -1189,7 +1188,12 @@ unsafe impl<'r, 't> Searcher<'t> for RegexSearcher<'r, 't> {
     }
 }
 
-fn exec(re: &Regex, caps: &mut CaptureIdxs, text: &str, start: usize) -> bool {
+fn exec(
+    re: &Regex,
+    caps: CaptureSlotsBorrowed,
+    text: &str,
+    start: usize,
+) -> bool {
     match *re {
         Regex::Native(ExNative { ref prog, .. }) => (*prog)(caps, text, start),
         Regex::Dynamic(ref prog) => prog.exec(caps, text, start),

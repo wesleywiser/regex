@@ -463,6 +463,7 @@ pub use re::{
 pub use set::{RegexSetBuilder, RegexSet};
 
 mod backtrack;
+mod captures;
 mod char;
 mod char_utf8;
 mod compile;

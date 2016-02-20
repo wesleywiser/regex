@@ -8,12 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use captures::CaptureSlots;
 use dfa;
 use exec::Search;
 use input::{ByteInput, CharInput};
 use nfa::Nfa;
 use program::{Program, ProgramBuilder};
-use re::CaptureIdxs;
 
 use Error;
 
@@ -73,9 +73,9 @@ impl SetExecBuilder {
 }
 
 impl SetExec {
-    pub fn exec(
+    pub fn exec<'matches, C: CaptureSlots>(
         &self,
-        search: Search,
+        search: Search<'matches, C>,
         text: &str,
         start: usize,
     ) -> bool {
@@ -86,9 +86,9 @@ impl SetExec {
         }
     }
 
-    fn exec_nfa(
+    fn exec_nfa<'matches, C: CaptureSlots>(
         &self,
-        search: Search,
+        search: Search<'matches, C>,
         text: &str,
         start: usize,
     ) -> bool {
@@ -99,9 +99,9 @@ impl SetExec {
         }
     }
 
-    fn exec_dfa(
+    fn exec_dfa<'matches, C: CaptureSlots>(
         &self,
-        search: Search,
+        search: Search<'matches, C>,
         text: &str,
         start: usize,
     ) -> bool {
@@ -110,7 +110,7 @@ impl SetExec {
 
     /// Return a fresh allocation for storing all possible captures in the
     /// underlying regular expression.
-    pub fn alloc_captures(&self) -> Vec<Option<usize>> {
+    pub fn alloc_captures(&self) -> Vec<Vec<Option<usize>>> {
         self.prog.alloc_captures()
     }
 }

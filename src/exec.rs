@@ -9,27 +9,24 @@
 // except according to those terms.
 
 use backtrack::{self, Backtrack};
+use captures::{CaptureSlots, CaptureSlotsBorrowed};
 use dfa::{self, Dfa, DfaResult};
 use input::{ByteInput, CharInput};
+use inst::InstSave;
 use nfa::Nfa;
 use program::{Program, ProgramBuilder};
-use re::CaptureIdxs;
 
 use {Regex, Error};
 
 /// The parameters to running one of the four match engines.
 #[derive(Debug)]
-pub struct Search<'caps, 'matches> {
+pub struct Search<'matches, C> {
     /// The matching engine writes capture locations to this slice.
     ///
     /// Note that some matching engines, like the DFA, have limited support
     /// for this. The DFA can only fill in one capture location (the end
     /// location of the match).
-    pub caps: &'caps mut [Option<usize>],
-    /// The number of captures requested per regex.
-    ///
-    /// For a single, this should always equal caps.len().
-    pub caps_per_regex: usize,
+    pub captures: C,
     /// The matching engine indicates which match instructions were executed
     /// when searching stopped.
     ///
@@ -39,44 +36,9 @@ pub struct Search<'caps, 'matches> {
     pub matches: &'matches mut [bool],
 }
 
-impl<'c, 'm> Search<'c, 'm> {
-    pub fn copy_to_match(
-        &mut self,
-        prog: &Program,
-        match_slot: usize,
-        caps: &[Option<usize>],
-    ) {
-        // BREADCRUMBS:
-        // OK, so the issue here is that we don't really know which capture
-        // slots belong to which regex. We tried by creating a map from match
-        // slot to capture slot range, but this doesn't hold up because the
-        // capture slots vary based on the callers' needs. For example, the
-        // captures might be empty (is_match), or they might have two slots
-        // per regex (find_iter) or they might have slots for every capture
-        // (captures).
-        //
-        // The only thing I can think of is that captures needs to be layered.
-        // Instead of a contiguous sequence, we could split it up into several
-        // sequences---one for each regex. This suggests a
-        // `Vec<Vec<Option<usize>>>`.
-        //
-        // This is itself problematic because we don't want to be forced into
-        // allocating slots for captures for everything.
-        //
-        // Instead, perhaps we should store captures in row-major order. This
-        // struct would then need to store the number of captures desired for
-        // each regex (columns). Each regex is a single row. We should then
-        // be able to set captures with
-        //
-        //   let s = match_slot * caps_per_regex;
-        //   let e = s + caps_per_regex + 1;
-        //   memcpy(self.caps[s..e], caps[s..e]);
-        let s = match_slot * self.caps_per_regex;
-        let e = s + self.caps_per_regex;
-        for (slot, val) in self.caps[s..e].iter_mut().zip(caps[s..e].iter()) {
-            *slot = *val;
-        }
-        self.matches[match_slot] = true;
+impl<'matches, C: CaptureSlots> Search<'matches, C> {
+    pub fn quit_after_first_match(&self) -> bool {
+        self.captures.num_matches() == 0 && self.matches.len() == 1
     }
 }
 
@@ -258,7 +220,7 @@ impl Exec {
     /// automatically.
     pub fn exec(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
@@ -275,11 +237,11 @@ impl Exec {
     /// Like exec, but always selects the engine automatically.
     pub fn exec_auto(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
-        if caps.len() <= 2 && self.prog.is_prefix_match() {
+        if caps[0].len() <= 2 && self.prog.is_prefix_match() {
             // We should be able to execute the literal engine even if there
             // are more captures by falling back to the NFA engine after a
             // match. However, that's effectively what the NFA engine does
@@ -297,7 +259,7 @@ impl Exec {
     /// Note that self.can_dfa must be true. This will panic otherwise.
     fn exec_dfa(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
@@ -311,7 +273,7 @@ impl Exec {
         };
         // If caller has not requested any captures, then we don't need to
         // find the start position.
-        if caps.is_empty() {
+        if caps[0].is_empty() {
             return true;
         }
         // invariant: caps.len() >= 2 && caps.len() % 2 == 0
@@ -320,11 +282,11 @@ impl Exec {
         if start == match_end {
             // Be careful... If the caller wants sub-captures, than we are
             // obliged to run the NFA to get them.
-            if caps.len() == 2 {
+            if caps[0].len() == 2 {
                 // The caller only needs the start/end, so we can avoid the
                 // NFA here.
-                caps[0] = Some(start);
-                caps[1] = Some(start);
+                caps[0][0] = Some(start);
+                caps[0][1] = Some(start);
                 return true;
             }
             return self.exec_auto_nfa(caps, text, start);
@@ -342,11 +304,11 @@ impl Exec {
                 panic!("BUG: forward match implies backward match")
             }
         };
-        if caps.len() == 2 {
+        if caps[0].len() == 2 {
             // If the caller doesn't care about capture locations, then we can
             // avoid running the NFA to fill them in.
-            caps[0] = Some(match_start);
-            caps[1] = Some(match_end);
+            caps[0][0] = Some(match_start);
+            caps[0][1] = Some(match_end);
             return true;
         }
         self.exec_auto_nfa(caps, text, match_start)
@@ -356,7 +318,7 @@ impl Exec {
     /// full NFA simulation or the bounded backtracking engine.
     fn exec_auto_nfa(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
@@ -370,21 +332,18 @@ impl Exec {
     /// Always run the NFA algorithm.
     fn exec_nfa(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
-        let cap_len = caps.len();
         if self.prog.insts.is_bytes() {
             Nfa::exec(&self.prog, ByteInput::new(text), start, Search {
-                caps: caps,
-                caps_per_regex: cap_len,
+                captures: caps,
                 matches: &mut [false],
             })
         } else {
             Nfa::exec(&self.prog, CharInput::new(text), start, Search {
-                caps: caps,
-                caps_per_regex: cap_len,
+                captures: caps,
                 matches: &mut [false],
             })
         }
@@ -393,21 +352,18 @@ impl Exec {
     /// Always runs the NFA using bounded backtracking.
     fn exec_backtrack(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
-        let cap_len = caps.len();
         if self.prog.insts.is_bytes() {
             Backtrack::exec(&self.prog, ByteInput::new(text), start, Search {
-                caps: caps,
-                caps_per_regex: cap_len,
+                captures: caps,
                 matches: &mut [false],
             })
         } else {
             Backtrack::exec(&self.prog, CharInput::new(text), start, Search {
-                caps: caps,
-                caps_per_regex: cap_len,
+                captures: caps,
                 matches: &mut [false],
             })
         }
@@ -422,7 +378,7 @@ impl Exec {
     /// This panics if the set of literals do not correspond to matches.
     fn exec_literals(
         &self,
-        caps: &mut CaptureIdxs,
+        caps: CaptureSlotsBorrowed,
         text: &str,
         start: usize,
     ) -> bool {
@@ -430,9 +386,9 @@ impl Exec {
         match self.prog.prefixes.find(&text.as_bytes()[start..]) {
             None => false,
             Some((s, e)) => {
-                if caps.len() == 2 {
-                    caps[0] = Some(start + s);
-                    caps[1] = Some(start + e);
+                if caps[0].len() == 2 {
+                    caps[0][0] = Some(start + s);
+                    caps[0][1] = Some(start + e);
                 }
                 true
             }
@@ -453,12 +409,12 @@ impl Exec {
     ///
     /// Any capture that isn't named is None.
     pub fn capture_names(&self) -> &[Option<String>] {
-        &self.prog.insts.capture_names()
+        &self.prog.insts.captures[0]
     }
 
     /// Return a fresh allocation for storing all possible captures in the
     /// underlying regular expression.
-    pub fn alloc_captures(&self) -> Vec<Option<usize>> {
+    pub fn alloc_captures(&self) -> Vec<Vec<Option<usize>>> {
         self.prog.alloc_captures()
     }
 }
