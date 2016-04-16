@@ -33,6 +33,13 @@ case $which in
       --features re-rust-plugin \
       "$@"
     ;;
+  re2)
+    exec cargo bench \
+      --manifest-path benches/Cargo.toml \
+      --bench re2 \
+      --features re-re2 \
+      "$@"
+    ;;
   pcre)
     exec cargo bench \
       --manifest-path benches/Cargo.toml \

@@ -21,6 +21,7 @@ regex_macros = { version = "0.1", path = "../regex_macros", optional = true }
 regex-syntax = { version = "0.3", path = "../regex-syntax" }
 
 [build-dependencies]
+gcc = "0.3"
 pkg-config = "0.3"
 
 # Use features to conditionally compile benchmarked regexes, since not every
@@ -31,6 +32,7 @@ pkg-config = "0.3"
 re-pcre = ["libpcre-sys"]
 re-pcre2 = []
 re-onig = ["onig"]
+re-re2 = []
 re-rust = []
 re-rust-bytes = []
 re-rust-plugin = ["regex_macros"]
@@ -53,6 +55,13 @@ bench = true
 [[bench]]
 name = "rust-plugin"
 path = "src/bench_rust_plugin.rs"
+test = false
+bench = true
+
+# Run the benchmarks on RE2.
+[[bench]]
+name = "re2"
+path = "src/bench_re2.rs"
 test = false
 bench = true
 
